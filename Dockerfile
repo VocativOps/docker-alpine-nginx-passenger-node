@@ -216,7 +216,7 @@ RUN rm -rf \
     /var/cache/apk/* \
     /tmp/* \
     /etc/ssl \
-    /root/.gnupg
+    /root/.gnupg \
     /usr/share/man
 
 WORKDIR /usr/src/app
