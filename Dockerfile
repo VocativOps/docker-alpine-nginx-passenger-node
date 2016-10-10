@@ -1,5 +1,107 @@
 FROM ruby:alpine
 
+# node
+
+ENV NODE_VERSION="6.7.0"
+ENV NPM_VERSION="3.10.8"
+
+RUN apk add --no-cache --virtual .node-builddeps curl make gcc g++ python linux-headers paxctl gnupg \
+    && apk add --no-cache --virtual .node-rundeps libgcc libstdc++ \
+    && gpg --keyserver ha.pool.sks-keyservers.net --recv-keys \
+        9554F04D7259F04124DE6B476D5A82AC7E37093B \
+        94AE36675C464D64BAFA68DD7434390BDBE9B9C5 \
+        0034A06D9D9B0064CE8ADF6BF1747F4AD2306D93 \
+        FD3A5288F042B6850C66B31F09FE44734EB7990E \
+        71DCFD284A79C3B38668286BC97EC7A07EDE3FC1 \
+        DD8F2338BAE7501E3DD5AC78C273792F7D83545D \
+        C4F0DFFF4E8C1A8236409D08E73BC641CC11F4C8 \
+        B9AE9905FFD7803F25714661B63B535A4C206CA9 \
+    && curl -o node-v${NODE_VERSION}.tar.gz -sSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.gz \
+    && curl -o SHASUMS256.txt.asc -sSL https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt.asc \
+    && gpg --verify SHASUMS256.txt.asc \
+    && grep node-v${NODE_VERSION}.tar.gz SHASUMS256.txt.asc | sha256sum -c - \
+    && tar -zxf node-v${NODE_VERSION}.tar.gz \
+    && cd node-v${NODE_VERSION} \
+    && export GYP_DEFINES="linux_use_gold_flags=0" \
+    && ./configure \
+        --prefix=/usr \
+    && make -j$(getconf _NPROCESSORS_ONLN) -C out mksnapshot BUILDTYPE=Release \
+    && paxctl -cm out/Release/mksnapshot \
+    && make -j$(getconf _NPROCESSORS_ONLN) \
+    && make install \
+    && paxctl -cm /usr/bin/node \
+    && cd / \
+    && if [ -x /usr/bin/npm ]; then \
+        npm install -g npm@${NPM_VERSION} \
+        && find /usr/lib/node_modules/npm -name test -o -name .bin -type d | xargs rm -rf; \
+    fi \
+    && apk del .node-builddeps \
+    && rm -rf \
+        /node-v${NODE_VERSION}.tar.gz \
+        /SHASUMS256.txt.asc \
+        /node-v${NODE_VERSION} \
+        /root/.npm \
+        /root/.node-gyp \
+        /usr/lib/node_modules/npm/man \
+        /usr/lib/node_modules/npm/doc \
+        /usr/lib/node_modules/npm/html
+
+WORKDIR /usr/src/app
+
+ONBUILD COPY package.json /usr/src/app
+ONBUILD RUN npm install
+ONBUILD COPY . /usr/src/app
+
+# passenger
+
+ENV PASSENGER_VERSION 5.0.30
+
+ENV PATH "/opt/passenger/bin:$PATH"
+
+RUN echo "http://alpine.gliderlabs.com/alpine/edge/main" > /etc/apk/repositories \
+    \
+    && apk add --no-cache --virtual .passenger-rundeps ca-certificates ruby procps curl pcre libstdc++ libexecinfo \
+    && update-ca-certificates \
+    && apk add --no-cache --virtual .passenger-builddeps build-base ruby-dev linux-headers curl-dev pcre-dev libexecinfo-dev \
+    \
+    && mkdir -p /opt \
+    && curl -sSL https://github.com/phusion/passenger/archive/release-${PASSENGER_VERSION}.tar.gz | tar -zx -C /opt \
+    && mv /opt/passenger-release-${PASSENGER_VERSION} /opt/passenger \
+    \
+    && export EXTRA_PRE_CFLAGS="-O" \
+    && export EXTRA_PRE_CXXFLAGS="-O" \
+    && export EXTRA_LDFLAGS="-lexecinfo" \
+    \
+    && passenger-config compile-agent --auto --optimize \
+    && passenger-config install-standalone-runtime --auto --url-root=fake --connect-timeout=1 \
+    && passenger-config build-native-support \
+    \
+    && mkdir -p /usr/src/app \
+    \
+    && rm -rf /tmp/* \
+    \
+    && mv /opt/passenger/src/ruby_supportlib /tmp \
+    && mv /opt/passenger/src/nodejs_supportlib /tmp \
+    && mv /opt/passenger/src/ruby_native_extension /tmp \
+    && mv /opt/passenger/src/helper-scripts /tmp \
+    && rm -rf /opt/passenger/src/* \
+    \
+    && mv /tmp/* /opt/passenger/src/ \
+    \
+    && passenger-config validate-install --auto \
+    && apk del .passenger-builddeps \
+    && rm -rf /usr/include/execinfo.h \
+        /opt/passenger/doc
+
+RUN rm -rf \
+    /var/cache/apk/* \
+    /tmp/* \
+    /etc/ssl \
+    /root/.gnupg \
+    /usr/share/man
+
+# nginx
+
 ENV NGINX_VERSION 1.11.4
 
 RUN GPG_KEYS=B0F4253373F8F6F510D42178520A9993A1C052F8 \
@@ -47,6 +149,7 @@ RUN GPG_KEYS=B0F4253373F8F6F510D42178520A9993A1C052F8 \
         --with-file-aio \
         --with-http_v2_module \
         --with-ipv6 \
+        --add-module=$(passenger-config --nginx-addon-dir) \
     " \
     && addgroup -S nginx \
     && adduser -D -S -h /var/cache/nginx -s /sbin/nologin -G nginx nginx \
@@ -125,101 +228,10 @@ RUN GPG_KEYS=B0F4253373F8F6F510D42178520A9993A1C052F8 \
     && ln -sf /dev/stderr /var/log/nginx/error.log
 
 ONBUILD COPY nginx.conf /etc/nginx/nginx.conf
-ONBUILD COPY nginx.vh.default.conf /etc/nginx/conf.d/default.conf
+ONBUILD COPY nginx.vh.*.conf /etc/nginx/conf.d/
 
-ENV NODE_VERSION="6.7.0"
-ENV NPM_VERSION="3.10.8"
+# app
 
-RUN apk add --no-cache --virtual .node-builddeps curl make gcc g++ python linux-headers paxctl gnupg \
-    && apk add --no-cache --virtual .node-rundeps libgcc libstdc++ \
-    && gpg --keyserver ha.pool.sks-keyservers.net --recv-keys \
-        9554F04D7259F04124DE6B476D5A82AC7E37093B \
-        94AE36675C464D64BAFA68DD7434390BDBE9B9C5 \
-        0034A06D9D9B0064CE8ADF6BF1747F4AD2306D93 \
-        FD3A5288F042B6850C66B31F09FE44734EB7990E \
-        71DCFD284A79C3B38668286BC97EC7A07EDE3FC1 \
-        DD8F2338BAE7501E3DD5AC78C273792F7D83545D \
-        C4F0DFFF4E8C1A8236409D08E73BC641CC11F4C8 \
-        B9AE9905FFD7803F25714661B63B535A4C206CA9 \
-    && curl -o node-v${NODE_VERSION}.tar.gz -sSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.gz \
-    && curl -o SHASUMS256.txt.asc -sSL https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt.asc \
-    && gpg --verify SHASUMS256.txt.asc \
-    && grep node-v${NODE_VERSION}.tar.gz SHASUMS256.txt.asc | sha256sum -c - \
-    && tar -zxf node-v${NODE_VERSION}.tar.gz \
-    && cd node-v${NODE_VERSION} \
-    && export GYP_DEFINES="linux_use_gold_flags=0" \
-    && ./configure \
-        --prefix=/usr \
-    && make -j$(getconf _NPROCESSORS_ONLN) -C out mksnapshot BUILDTYPE=Release \
-    && paxctl -cm out/Release/mksnapshot \
-    && make -j$(getconf _NPROCESSORS_ONLN) \
-    && make install \
-    && paxctl -cm /usr/bin/node \
-    && cd / \
-    && if [ -x /usr/bin/npm ]; then \
-        npm install -g npm@${NPM_VERSION} \
-        && find /usr/lib/node_modules/npm -name test -o -name .bin -type d | xargs rm -rf; \
-    fi \
-    && apk del .node-builddeps \
-    && rm -rf \
-        /node-v${NODE_VERSION}.tar.gz \
-        /SHASUMS256.txt.asc \
-        /node-v${NODE_VERSION} \
-        /root/.npm \
-        /root/.node-gyp \
-        /usr/lib/node_modules/npm/man \
-        /usr/lib/node_modules/npm/doc \
-        /usr/lib/node_modules/npm/html
-
-# passenger
-
-ENV PASSENGER_VERSION 5.0.30
-
-ENV PATH "/opt/passenger/bin:$PATH"
-
-RUN echo "http://alpine.gliderlabs.com/alpine/edge/main" > /etc/apk/repositories \
-    \
-    && apk add --no-cache --virtual .passenger-rundeps ca-certificates ruby procps curl pcre libstdc++ libexecinfo \
-    && update-ca-certificates \
-    && apk add --no-cache --virtual .passenger-builddeps build-base ruby-dev linux-headers curl-dev pcre-dev libexecinfo-dev \
-    \
-    && mkdir -p /opt \
-    && curl -sSL https://github.com/phusion/passenger/archive/release-${PASSENGER_VERSION}.tar.gz | tar -zx -C /opt \
-    && mv /opt/passenger-release-${PASSENGER_VERSION} /opt/passenger \
-    \
-    && export EXTRA_PRE_CFLAGS="-O" \
-    && export EXTRA_PRE_CXXFLAGS="-O" \
-    && export EXTRA_LDFLAGS="-lexecinfo" \
-    \
-    && passenger-config compile-agent --auto --optimize \
-    && passenger-config install-standalone-runtime --auto --url-root=fake --connect-timeout=1 \
-    && passenger-config build-native-support \
-    \
-    && mkdir -p /usr/src/app \
-    \
-    && rm -rf /tmp/* \
-    \
-    && mv /opt/passenger/src/ruby_supportlib /tmp \
-    && mv /opt/passenger/src/nodejs_supportlib /tmp \
-    && mv /opt/passenger/src/ruby_native_extension /tmp \
-    && mv /opt/passenger/src/helper-scripts /tmp \
-    && rm -rf /opt/passenger/src/* \
-    \
-    && mv /tmp/* /opt/passenger/src/ \
-    \
-    && passenger-config validate-install --auto \
-    && apk del .passenger-builddeps \
-    && rm -rf /usr/include/execinfo.h \
-        /opt/passenger/doc
-
-RUN rm -rf \
-    /var/cache/apk/* \
-    /tmp/* \
-    /etc/ssl \
-    /root/.gnupg \
-    /usr/share/man
-
-WORKDIR /usr/src/app
 EXPOSE 80 443
 
 ENTRYPOINT ["nginx", "-g", "daemon off;"]
